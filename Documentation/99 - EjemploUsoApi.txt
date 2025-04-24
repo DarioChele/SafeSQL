@@ -1,0 +1,185 @@
+Como usar?
+📌 1. Configurar appsettings.json
+    Asegúrate de que en appsettings.json exista la cadena de conexión:
+        {
+            "ConnectionStrings": {
+                "DefaultConnection": "Server=myServer;Database=myDB;User Id=myUser;Password=myPassword;"
+            }
+        }
+📌 2. Registrar ConexionSql en Program.cs
+    Para usar ConexionSql, debemos agregarlo a los servicios de builder.Services:
+
+        using AccesoDatos; //NameSpace de ConexionSql
+        using Microsoft.Extensions.DependencyInjection;
+
+        var builder = WebApplication.CreateBuilder(args);
+
+        // 🚀 Configurar servicios y dependencias
+        builder.Services.AddControllers();
+        builder.Services.AddEndpointsApiExplorer();
+        builder.Services.AddSwaggerGen();
+
+        // 🚀 Inyección de dependencias
+        builder.Services.AddScoped<ConexionSql>();         // Gestiona la conexión con la base de datos
+        builder.Services.AddScoped<ArticuloLogicaNego>(); // Maneja la lógica de negocio
+
+        var app = builder.Build();
+
+        // 🚀 Configuración de middleware
+        if (app.Environment.IsDevelopment())
+        {... mas codigo ...
+
+
+    🔹 builder.Services.AddScoped<ConexionSql>(); // Inyección de dependencia
+        🔹 AddScoped<ConexionSql>() → Crea una instancia por cada solicitud HTTP, asegurando buena gestión de la conexión.
+
+📌 3. Inyectar ConexionSql en ArticuloLogicaNego
+    Así aseguramos que las operaciones CRUD se hagan desde la capa de lógica de negocios:
+
+        public class ArticuloLogicaNego {
+            private readonly ConexionSql _conexion;
+            public ArticuloLogicaNego(ConexionSql conexion) {
+                _conexion = conexion;
+            }
+
+            public async Task<List<Articulo>> ObtenerTodos() {
+                try{
+                    var dt = await _conexion.EjecutarConsultaDTAsync("SELECT * FROM Articulos", CommandType.Text, null);
+                    return dt.AsEnumerable()
+                            .Select(row => new Articulo
+                            {
+                                Id = row.Field<int>("Id"),
+                                Nombre = row.Field<string>("Nombre"),
+                                Precio = row.Field<decimal>("Precio")
+                            })
+                            .ToList();
+                }catch (Exception ex) {
+                    Console.WriteLine($"Error al obtener artículos: {ex.Message}"); // Log del error
+                    return new List<Articulo>(); // Retorna lista vacía en caso de error
+                }
+            }
+        }
+    🔹 El constructor recibe ConexionSql automáticamente gracias a la inyección de dependencias. 
+    🔹 El método ObtenerTodos() ejecuta la consulta y convierte DataTable en una lista de objetos Articulo.
+
+📌 4. Usar ParametrosSql para consultas dinámicas
+    Si quieres filtrar por ID, puedes utilizar ParametrosSql así:
+
+        public async Task<Articulo> ObtenerPorId(int id) {
+            var parametros = new ParametrosSql();
+            parametros.AgregarParametro("@Id", id, SqlDbType.Int);
+
+            var dt = await _conexion.EjecutarConsultaDTAsync("SELECT * FROM Articulos WHERE Id = @Id", CommandType.Text, parametros);
+            
+            return dt.AsEnumerable()
+                    .Select(row => new Articulo
+                    {
+                        Id = row.Field<int>("Id"),
+                        Nombre = row.Field<string>("Nombre"),
+                        Precio = row.Field<decimal>("Precio")
+                    })
+                    .FirstOrDefault();
+        }
+    🔹 Se usa ParametrosSql para evitar SQL Injection. 
+    🔹 Si la consulta no devuelve datos, FirstOrDefault() retorna null en lugar de generar error.
+
+📌 5. Implementar CRUD completo
+    5.1 Crear nuevo artículo
+        public async Task<int> Crear(Articulo articulo) {
+            var parametros = new ParametrosSql();
+            parametros.AgregarParametro("@Nombre", articulo.Nombre, SqlDbType.VarChar);
+            parametros.AgregarParametro("@Precio", articulo.Precio, SqlDbType.Decimal);
+
+            return await _conexion.EjecutarSentenciaAsync("INSERT INTO Articulos (Nombre, Precio) VALUES (@Nombre, @Precio)", CommandType.Text, parametros);
+        }
+    🔹 Devuelve el número de registros insertados. 
+    🔹 Usa parámetros para evitar SQL Injection.
+
+    5.2 Actualizar artículo (Incluye uso de RollbackTransaccion)
+        public async Task<int> Actualizar(Articulo articulo){
+            try{
+                _conexion.IniciarTransaccion(); // 🔹 Comienza la transacción
+
+                var parametros = new ParametrosSql();
+                parametros.AgregarParametro("@Id", articulo.Id, SqlDbType.Int);
+                parametros.AgregarParametro("@Nombre", articulo.Nombre, SqlDbType.VarChar);
+                parametros.AgregarParametro("@Precio", articulo.Precio, SqlDbType.Decimal);
+
+                int registrosAfectados = await _conexion.EjecutarSentenciaAsync(
+                    "UPDATE Articulos SET Nombre = @Nombre, Precio = @Precio WHERE Id = @Id", 
+                    CommandType.Text, parametros);
+
+                _conexion.CommitTransaccion(); // 🔹 Confirma los cambios si todo salió bien
+
+                return registrosAfectados;
+            }catch (Exception ex){
+                _conexion.RollbackTransaccion(); // 🔹 Revierte los cambios si hay un error
+                Console.WriteLine($"Error en la actualización: {ex.Message}");
+                return 0; // Se retorna 0 si hubo error
+            }
+        }
+
+    Explicación paso a paso
+        1️⃣ IniciarTransaccion() → Crea una transacción antes de ejecutar la consulta. 
+        2️⃣ Ejecuta la sentencia UPDATE normalmente. 
+        3️⃣ Si la ejecución es exitosa, CommitTransaccion() confirma los cambios. 
+        4️⃣ Si ocurre un error, RollbackTransaccion() revierte los cambios para evitar datos inconsistentes. 
+        5️⃣ Se captura la excepción y se registra el error, devolviendo 0 si hubo un problema.
+
+    🔥 ¿Cuándo es útil Rollback?
+        ✅ Si hay varias operaciones relacionadas y queremos asegurar que todas se completen correctamente (por ejemplo, actualizar múltiples registros en distintas tablas). 
+        ✅ Si queremos evitar datos inconsistentes → Un rollback asegura que los cambios no queden a medias en la BD si algo falla.
+        🔹 Ejemplo de escenario real: 
+            Si Actualizar() se usa dentro de un proceso mayor, como actualizar productos y stock en distintas tablas, 
+            el rollback evitaría que queden registros corruptos si algo falla.
+
+    5.3 Eliminar artículo (Solo por fines didacticos)
+        public async Task<int> Eliminar(int id) {
+            var parametros = new ParametrosSql();
+            parametros.AgregarParametro("@Id", id, SqlDbType.Int);
+
+            return await _conexion.EjecutarSentenciaAsync("DELETE FROM Articulos WHERE Id = @Id", CommandType.Text, parametros);
+        }
+    🔹 Evita eliminaciones accidentales usando un filtro por Id.
+    🔹 RECUERDA, las eliminaciones deben ser logicas no fisicas.
+
+📌 6. Usar ArticuloLogicaNego en el controlador
+        public class ArticuloController : ControllerBase {
+            private readonly ArticuloLogicaNego _articuloLogica;
+
+            public ArticuloController(ArticuloLogicaNego articuloLogica) {
+                _articuloLogica = articuloLogica;
+            }
+
+            [HttpGet]
+            public async Task<IActionResult> ObtenerTodos() {
+                var articulos = await _articuloLogica.ObtenerTodos();
+                return Ok(articulos);
+            }
+
+            [HttpGet("{id}")]
+            public async Task<IActionResult> ObtenerPorId(int id) {
+                var articulo = await _articuloLogica.ObtenerPorId(id);
+                return articulo != null ? Ok(articulo) : NotFound();
+            }
+
+            [HttpPost]
+            public async Task<IActionResult> Crear([FromBody] Articulo articulo) {
+                var registrosAfectados = await _articuloLogica.Crear(articulo);
+                return registrosAfectados > 0 ? Ok("Artículo creado correctamente.") : BadRequest("Error al crear el artículo.");
+            }
+
+            [HttpPut]
+            public async Task<IActionResult> Actualizar([FromBody] Articulo articulo) {
+                var registrosAfectados = await _articuloLogica.Actualizar(articulo);
+                return registrosAfectados > 0 ? Ok("Artículo actualizado correctamente.") : NotFound("El artículo no existe.");
+            }
+
+            [HttpDelete("{id}")]
+            public async Task<IActionResult> Eliminar(int id) {
+                var registrosAfectados = await _articuloLogica.Eliminar(id);
+                return registrosAfectados > 0 ? Ok("Artículo eliminado correctamente.") : NotFound("El artículo no existe.");
+            }
+        }
+    🔹 Ahora ArticuloController delega TODA la lógica de negocio a ArticuloLogicaNego. 
+    🔹 El controlador solo gestiona las respuestas HTTP (Ok, NotFound, BadRequest). 🔹 Este enfoque mantiene el código modular, limpio y reutilizable.

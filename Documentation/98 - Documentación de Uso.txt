@@ -1,0 +1,155 @@
+📌 Documentación de Uso - ConexionSql.cs
+Descripción
+Este documento proporciona una guía detallada sobre el uso de ConexionSql.cs, incluyendo la inyección de dependencias, la ejecución de consultas y el manejo adecuado de transacciones.
+
+🔹 1. Inyección de Dependencias
+    Para utilizar ConexionSql, debemos inyectarlo en el contenedor de servicios en Program.cs:
+
+        // 📌 Configuración en `Program.cs`
+        builder.Services.AddScoped<ConexionSql>();         // Gestiona la conexión con la base de datos
+        builder.Services.AddScoped<ArticuloLogicaNego>(); // Maneja la lógica de negocio
+
+    📢 Nota: ParametrosSql NO se inyecta, ya que es una clase auxiliar que se crea cuando se necesita en cada consulta.
+
+🔹 2. Gestión de Conexión
+    ✅ ConexionSql.cs abre y cierra la conexión automáticamente, por lo que NO es necesario llamarla manualmente. 🚫 NO debes hacer esto:
+
+        try {
+            conexion.AbrirConexion(); // ❌ No es necesario llamarlo manualmente
+            // Operaciones con la base de datos...
+        } finally {
+            conexion.CerrarConexion(); // ❌ No es necesario cerrarlo manualmente
+        }
+    🚫 Tampoco debes crear instancias manualmente, ya que la conexión está inyectada en el contenedor de servicios:
+
+        using (var conexion = new ConexionSql(configuration)) // ❌ No se debe hacer así { 
+            // La conexión ya está administrada por inyección de dependencias
+        }
+    ✅ Siempre usa la variable inyectada dentro de la lógica de negocios (ArticuloLogicaNego).
+
+🔹 3. Manejo de Transacciones
+    Cuando se requiere asegurar que un conjunto de operaciones se ejecuten todas o ninguna, utilizamos transacciones con commit y rollback:
+
+    conexion.IniciarTransaccion();
+    try {
+        // 🛠️ Operaciones dentro de la transacción...
+        conexion.CommitTransaccion(); // ✅ Confirma los cambios en la BD
+    } catch {
+        conexion.RollbackTransaccion(); // 🔄 Revierte los cambios si hay error
+        throw;
+    }
+    📌 Siempre usar rollback si ocurre un error para evitar inconsistencias en la base de datos.
+
+🔹 4. Ejecución de Consultas
+    📌 Consultas que devuelven un DataTable
+
+        var parametros = new ParametrosSql();
+        parametros.AgregarParametro("@categoriaId", 3, SqlDbType.Int);
+
+        var productos = await _conexion.EjecutarConsultaDTAsync("SELECT * FROM Productos WHERE CategoriaId = @categoriaId", CommandType.Text, parametros);
+
+        foreach (DataRow row in productos.Rows) {
+            Console.WriteLine(row["Nombre"]);
+        }
+
+    📌 Si DataTable se convierte inmediatamente en una lista, usar EjecutarConsultaListaAsync() es mejor.
+    📌 Consultas que devuelven una lista (EjecutarConsultaListaAsync)
+        Si siempre necesitas los datos como una lista de objetos, podríamos definir este método:
+
+            public async Task<List<T>> EjecutarConsultaListaAsync<T>(string sql, CommandType tipo, ParametrosSql parametros, Func<DataRow, T> mapear) {
+                using (var comando = CrearComando(sql, tipo, parametros, DefaultTimeout))
+                using (var reader = await comando.ExecuteReaderAsync()){
+                    var dt = new DataTable();
+                    dt.Load(reader);
+                    return dt.AsEnumerable().Select(mapear).ToList();
+                }
+            }
+        🔹 Ejemplo de uso:
+
+            var articulos = await _conexion.EjecutarConsultaListaAsync("SELECT * FROM Articulos", 
+                    CommandType.Text, null, 
+                    row => new Articulo {
+                        Id = row.Field<int>("Id"),
+                        Nombre = row.Field<string>("Nombre"),
+                        Precio = row.Field<decimal>("Precio")
+                    });
+        ✅ Ahora ArticuloLogicaNego no necesita hacer la conversión manual.
+
+🔹 5. Ejecución de Comandos (INSERT/UPDATE/DELETE)
+    📌 Siempre usar ParametrosSql para evitar SQL Injection.
+
+        var parametros = new ParametrosSql();
+        parametros.AgregarParametro("@nombre", "Nuevo Producto", SqlDbType.NVarChar);
+        parametros.AgregarParametro("@precio", 99.99m, SqlDbType.Decimal);
+
+        int filasAfectadas = await _conexion.EjecutarSentenciaAsync(
+            "INSERT INTO Productos (Nombre, Precio) VALUES (@nombre, @precio)", 
+            CommandType.Text, 
+            parametros);
+    ✅ Este método devuelve el número de registros afectados.
+
+🔹 6. Manejo de Rollback en Actualizar()
+    Cuando se actualizan datos, es recomendable usar transacciones para evitar inconsistencias:
+
+        public async Task<int> Actualizar(Articulo articulo) {
+            try {
+                _conexion.IniciarTransaccion();
+
+                var parametros = new ParametrosSql();
+                parametros.AgregarParametro("@Id", articulo.Id, SqlDbType.Int);
+                parametros.AgregarParametro("@Nombre", articulo.Nombre, SqlDbType.VarChar);
+                parametros.AgregarParametro("@Precio", articulo.Precio, SqlDbType.Decimal);
+
+                int registrosAfectados = await _conexion.EjecutarSentenciaAsync(
+                    "UPDATE Articulos SET Nombre = @Nombre, Precio = @Precio WHERE Id = @Id",
+                    CommandType.Text, parametros);
+
+                _conexion.CommitTransaccion();
+                return registrosAfectados;
+            } catch (Exception ex) {
+                _conexion.RollbackTransaccion();
+                Console.WriteLine($"Error en la actualización: {ex.Message}");
+                return 0;
+            }
+        }
+    ✅ Si ocurre un error, los cambios NO se aplicarán.
+
+🔹 7. Buenas Prácticas
+    ✔️ Usar transacciones para garantizar operaciones atómicas. 
+    ✔️ Siempre usar ParametrosSql para evitar SQL Injection. 
+    ✔️ Evitar instancias manuales de ConexionSql, ya que la inyección de dependencias administra la conexión. 
+    ✔️ Preferir métodos asíncronos (async/await) en aplicaciones concurrentes. 
+    ✔️ Configurar timeout adecuado para operaciones largas.
+
+🔹 8. Ejemplo Completo - Transacción Completa
+
+    using (var conexion = _conexion) // 📌 Usa la instancia inyectada{
+        conexion.IniciarTransaccion();
+        try {
+            var parametrosCat = new ParametrosSql();
+            parametrosCat.AgregarParametro("@nombre", "Electrónicos", SqlDbType.NVarChar);
+
+            int catId = (int)conexion.EjecutarEscalar(
+                "INSERT INTO Categorias (Nombre) OUTPUT INSERTED.Id VALUES (@nombre)",
+                CommandType.Text,
+                parametrosCat);
+
+            var dtProductos = new DataTable();
+            dtProductos.Columns.Add("Nombre", typeof(string));
+            dtProductos.Columns.Add("Precio", typeof(decimal));
+            dtProductos.Columns.Add("CategoriaId", typeof(int));
+
+            dtProductos.Rows.Add("TV 4K", 499.99m, catId);
+            dtProductos.Rows.Add("Smartphone", 299.99m, catId);
+
+            conexion.EjecutarMasivoDT("dbo.Productos", dtProductos);
+
+            conexion.CommitTransaccion();
+        } catch (Exception ex) {
+            conexion.RollbackTransaccion();
+            Console.WriteLine($"Error en la transacción: {ex.Message}");
+            throw;
+        }
+    }
+
+🚀 ¡Ahora a programar...!!
